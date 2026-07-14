@@ -1,7 +1,7 @@
 """
 动作重定向模块 — 成员D
 
-将人体关键点位置（MotionData.positions）转换为机器人关节角度（MotionData.angles）。
+将人体关键点位置转换为 Booster T1 机器人23个执行器角度。
 """
 
 from __future__ import annotations
@@ -15,47 +15,45 @@ import yaml
 from common.interfaces import Retargeting
 from common.motion_data import MotionData, BOOSTER_T1_JOINT_NAMES
 
+# MuJoCo 执行器顺序（与 t1.xml 一致）
+ACTUATOR_NAMES = [
+    "AAHead_yaw", "Head_pitch",
+    "Left_Shoulder_Pitch", "Left_Shoulder_Roll", "Left_Elbow_Pitch", "Left_Elbow_Yaw",
+    "Right_Shoulder_Pitch", "Right_Shoulder_Roll", "Right_Elbow_Pitch", "Right_Elbow_Yaw",
+    "Waist",
+    "Left_Hip_Pitch", "Left_Hip_Roll", "Left_Hip_Yaw", "Left_Knee_Pitch",
+    "Left_Ankle_Pitch", "Left_Ankle_Roll",
+    "Right_Hip_Pitch", "Right_Hip_Roll", "Right_Hip_Yaw", "Right_Knee_Pitch",
+    "Right_Ankle_Pitch", "Right_Ankle_Roll",
+]
+
+# t1.xml 关节限位（弧度）
+JOINT_LIMITS = {
+    "AAHead_yaw": (-1.57, 1.57), "Head_pitch": (-0.35, 1.22),
+    "Left_Shoulder_Pitch": (-3.31, 1.22), "Left_Shoulder_Roll": (-1.74, 1.57),
+    "Left_Elbow_Pitch": (-2.27, 2.27), "Left_Elbow_Yaw": (-2.44, 0.0),
+    "Right_Shoulder_Pitch": (-3.31, 1.22), "Right_Shoulder_Roll": (-1.57, 1.74),
+    "Right_Elbow_Pitch": (-2.27, 2.27), "Right_Elbow_Yaw": (0.0, 2.44),
+    "Waist": (-1.57, 1.57),
+    "Left_Hip_Pitch": (-1.8, 1.57), "Left_Hip_Roll": (-0.2, 1.57),
+    "Left_Hip_Yaw": (-1.0, 1.0), "Left_Knee_Pitch": (0.0, 2.34),
+    "Left_Ankle_Pitch": (-0.87, 0.35), "Left_Ankle_Roll": (-0.44, 0.44),
+    "Right_Hip_Pitch": (-1.8, 1.57), "Right_Hip_Roll": (-1.57, 0.2),
+    "Right_Hip_Yaw": (-1.0, 1.0), "Right_Knee_Pitch": (0.0, 2.34),
+    "Right_Ankle_Pitch": (-0.87, 0.35), "Right_Ankle_Roll": (-0.44, 0.44),
+}
+
 
 class RetargetingImpl(Retargeting):
-    """动作重定向实现类
-
-    根据人体关节位置计算机器人关节角度。
-
-    Parameters
-    ----------
-    config_path : Optional[Union[str, Path]]
-        mapping.yaml 配置文件路径，默认为 config/mapping.yaml
-    """
 
     def __init__(self, config_path: Optional[Union[str, Path]] = None):
         if config_path is None:
             config_path = Path(__file__).parent / "config" / "mapping.yaml"
-
         with open(config_path, "r", encoding="utf-8") as f:
             config = yaml.safe_load(f)
-
-        self.parent_map: Dict[str, str] = config.get("parent_map", {})
-        self.scale_factors: Dict[str, float] = config.get("scale_factors", {"default": 0.8})
-        self.joint_limits: Dict[str, Tuple[float, float]] = config.get("joint_limits", {})
-
-        # 机器人标准关节列表
-        self.robot_joint_names = BOOSTER_T1_JOINT_NAMES
+        self.scale_factors = config.get("scale_factors", {"default": 0.8})
 
     def retarget(self, human_motion: MotionData, **kwargs) -> MotionData:
-        """将人体动作映射为机器人关节角度
-
-        Parameters
-        ----------
-        human_motion : MotionData
-            人体姿态数据，positions 已填充，形状 (T, J, 3)
-        **kwargs
-            scale : float, 可选，全局缩放因子
-
-        Returns
-        -------
-        MotionData
-            机器人关节角度数据，angles 已填充，形状 (T, J)
-        """
         if human_motion.positions is None:
             raise ValueError("human_motion.positions 不能为 None")
 
@@ -63,27 +61,34 @@ class RetargetingImpl(Retargeting):
         T = positions.shape[0]
         scale = kwargs.get("scale", self.scale_factors.get("default", 0.8))
 
-        # 构建关节名称 → 索引映射
-        joint_name_to_idx = {
-            name: i for i, name in enumerate(human_motion.joint_names)
-        }
+        name_to_idx = {name: i for i, name in enumerate(human_motion.joint_names)}
 
-        # 逐帧计算角度
-        robot_angles = np.zeros((T, len(self.robot_joint_names)), dtype=np.float32)
-
+        # 第一遍：计算每帧原始角度
+        raw_angles = np.zeros((T, 23), dtype=np.float32)
         for t in range(T):
-            frame_pos = positions[t]
-            angles = self._compute_frame_angles(frame_pos, joint_name_to_idx, scale)
-            robot_angles[t] = angles
+            raw_angles[t] = self._compute_angles(positions[t], name_to_idx)
 
-        # 应用关节限位
-        for i, joint_name in enumerate(self.robot_joint_names):
-            if joint_name in self.joint_limits:
-                min_val, max_val = self.joint_limits[joint_name]
-                robot_angles[:, i] = np.clip(robot_angles[:, i], min_val, max_val)
+        # 中位数作为中性站立姿态
+        neutral = np.median(raw_angles, axis=0)
+
+        # 第二遍：分部位缩放（腿部幅度缩小，避免双脚离地）
+        arm_scale = scale * 1.0      # 2-9 手臂
+        body_scale = scale * 0.6     # 0-1, 10 头+躯干
+
+        robot_angles = np.zeros((T, 23), dtype=np.float32)
+        for t in range(T):
+            delta = raw_angles[t] - neutral
+            for j in range(23):
+                if 11 <= j <= 22:
+                    s = 0.0  # 腿部完全锁定，脚不离地
+                elif 2 <= j <= 9:
+                    s = arm_scale
+                else:
+                    s = body_scale
+                robot_angles[t, j] = float(delta[j] * s)
 
         return MotionData(
-            joint_names=self.robot_joint_names.copy(),
+            joint_names=list(ACTUATOR_NAMES),
             fps=human_motion.fps,
             num_frames=T,
             positions=None,
@@ -91,61 +96,84 @@ class RetargetingImpl(Retargeting):
             timestamps=human_motion.timestamps,
         )
 
-    def _compute_frame_angles(
-        self,
-        pos: np.ndarray,
-        idx_map: Dict[str, int],
-        scale: float,
-    ) -> np.ndarray:
-        """计算单帧的机器人关节角度"""
-        angles = np.zeros(len(self.robot_joint_names), dtype=np.float32)
+    def _compute_angles(self, pos: np.ndarray, idx: Dict[str, int]) -> np.ndarray:
+        """从一帧3D关键点计算23个执行器原始角度。"""
+        angles = np.zeros(23)
 
-        def get_vec(joint_a: str, joint_b: str) -> np.ndarray:
-            """计算从 joint_a 到 joint_b 的向量"""
-            if joint_a not in idx_map or joint_b not in idx_map:
-                return np.zeros(3)
-            return pos[idx_map[joint_b]] - pos[idx_map[joint_a]]
+        def p(name):
+            return pos[idx[name]] if name in idx else np.zeros(3)
 
-        def get_angle(joint_parent: str, joint_child: str, joint_grandchild: str) -> float:
-            """计算 parent->child 和 child->grandchild 之间的夹角（弧度）"""
-            v1 = get_vec(joint_parent, joint_child)
-            v2 = get_vec(joint_child, joint_grandchild)
-            norm1 = np.linalg.norm(v1)
-            norm2 = np.linalg.norm(v2)
-            if norm1 < 1e-6 or norm2 < 1e-6:
-                return 0.0
-            cos_angle = np.clip(np.dot(v1, v2) / (norm1 * norm2), -1.0, 1.0)
-            return np.arccos(cos_angle)
+        # 中心点
+        m_sh = (p("left_shoulder") + p("right_shoulder")) / 2
+        m_hip = (p("left_hip") + p("right_hip")) / 2
 
-        # ---- 肘关节 ----
-        # 左肘：left_shoulder -> left_elbow -> left_wrist
-        angles[6] = get_angle("left_shoulder", "left_elbow", "left_wrist") * scale * self.scale_factors.get("arm", 0.7)
-        # 右肘
-        angles[9] = get_angle("right_shoulder", "right_elbow", "right_wrist") * scale * self.scale_factors.get("arm", 0.7)
+        # ---- 头部 ----
+        head = p("head") - m_sh
+        angles[0] = np.arctan2(head[0], abs(head[2]) + 1e-3)
+        angles[1] = np.arctan2(head[1], abs(head[2]) + 1e-3)
 
-        # ---- 膝关节 ----
-        # 左膝：left_hip -> left_knee -> left_ankle
-        angles[12] = get_angle("left_hip", "left_knee", "left_ankle") * scale * self.scale_factors.get("leg", 0.8)
-        # 右膝
-        angles[15] = get_angle("right_hip", "right_knee", "right_ankle") * scale * self.scale_factors.get("leg", 0.8)
+        # ---- 左臂 ----
+        lu = p("left_elbow") - p("left_shoulder")
+        lf = p("left_wrist") - p("left_elbow")
+        angles[2] = np.arctan2(lu[1], abs(lu[2]) + 1e-3)   # Pitch
+        angles[3] = np.arctan2(lu[0], abs(lu[2]) + 1e-3)   # Roll
+        angles[4] = np.pi - self._angle_between(lu, lf)     # 肘: 直=0, 弯=正
+        angles[5] = 0.0
 
-        # ---- 躯干倾斜（简化：用脊柱方向） ----
-        # 用 shoulder_center - hip_center 的倾斜角度表示 chest
-        if "left_shoulder" in idx_map and "right_shoulder" in idx_map and "left_hip" in idx_map:
-            shoulder_center = (pos[idx_map["left_shoulder"]] + pos[idx_map["right_shoulder"]]) / 2
-            hip_center = (pos[idx_map["left_hip"]] + pos[idx_map["right_hip"]]) / 2
-            spine = shoulder_center - hip_center
-            if np.linalg.norm(spine) > 1e-6:
-                # 与垂直方向（0,0,1）的夹角
-                vert = np.array([0, 0, 1])
-                cos_angle = np.clip(np.dot(spine, vert) / (np.linalg.norm(spine) * np.linalg.norm(vert)), -1.0, 1.0)
-                angles[2] = np.arccos(cos_angle) * scale * self.scale_factors.get("spine", 0.5)
+        # ---- 右臂 ----
+        ru = p("right_elbow") - p("right_shoulder")
+        rf = p("right_wrist") - p("right_elbow")
+        angles[6] = np.arctan2(ru[1], abs(ru[2]) + 1e-3)
+        angles[7] = np.arctan2(ru[0], abs(ru[2]) + 1e-3)
+        angles[8] = np.pi - self._angle_between(ru, rf)
+        angles[9] = 0.0
 
-        # ---- 其他关节暂时设为0（可扩展） ----
-        # 可在此添加肩关节、髋关节等更细致的计算
+        # ---- 躯干 ----
+        torso = m_sh - m_hip
+        angles[10] = np.arctan2(torso[0], abs(torso[2]) + 1e-3)
+
+        # ---- 左腿 ----
+        lt = p("left_knee") - p("left_hip")
+        ls = p("left_ankle") - p("left_knee")
+        angles[11] = np.arctan2(lt[1], abs(lt[2]) + 1e-3)       # Hip_Pitch
+        angles[12] = np.arctan2(lt[0], abs(lt[2]) + 1e-3) * 0.5 # Hip_Roll
+        angles[13] = 0.0                                          # Hip_Yaw
+        # 膝角: π - 大腿小腿夹角, 伸直=0, 弯曲=正
+        angles[14] = np.pi - self._angle_between(lt, ls)
+        angles[15] = 0.0  # Ankle_Pitch
+        angles[16] = 0.0  # Ankle_Roll
+
+        # ---- 右腿 ----
+        rt = p("right_knee") - p("right_hip")
+        rs = p("right_ankle") - p("right_knee")
+        angles[17] = np.arctan2(rt[1], abs(rt[2]) + 1e-3)
+        angles[18] = np.arctan2(rt[0], abs(rt[2]) + 1e-3) * 0.5
+        angles[19] = 0.0
+        angles[20] = np.pi - self._angle_between(rt, rs)
+        angles[21] = 0.0
+        angles[22] = 0.0
 
         return angles
 
+    @staticmethod
+    def _angle_between(v1, v2):
+        dot = np.dot(v1, v2)
+        n1, n2 = np.linalg.norm(v1), np.linalg.norm(v2)
+        if n1 < 1e-6 or n2 < 1e-6:
+            return 0.0
+        return float(np.arccos(np.clip(dot / (n1 * n2), -1.0, 1.0)))
+
+    @staticmethod
+    def _signed_angle(v1: np.ndarray, v2: np.ndarray, axis: np.ndarray) -> float:
+        """带符号的3D夹角：v1和v2的夹角，符号由绕axis的旋转方向决定。"""
+        dot = np.dot(v1, v2)
+        n1, n2 = np.linalg.norm(v1), np.linalg.norm(v2)
+        if n1 < 1e-6 or n2 < 1e-6:
+            return 0.0
+        angle = np.arccos(np.clip(dot / (n1 * n2), -1.0, 1.0))
+        cross = np.cross(v1, v2)
+        sign = 1.0 if np.dot(cross, axis) >= 0 else -1.0
+        return float(angle * sign)
+
     def get_joint_limits(self) -> Dict[str, Tuple[float, float]]:
-        """返回各关节的角度限位（弧度）"""
-        return self.joint_limits.copy()
+        return JOINT_LIMITS.copy()
