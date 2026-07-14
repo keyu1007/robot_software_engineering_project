@@ -1,53 +1,155 @@
 # ============================================================
-# 动作重定向配置 — 成员D
+# 动作重定向配置 — 成员D（最终完整版）
 # ============================================================
-# 说明：
-#   - 输入和输出使用相同的 23 个 Booster T1 标准关节名
-#   - 本配置文件定义关节角度计算所需的父子关系和缩放参数
 
-# 关节父子关系（用于计算角度）
-# 格式：子关节: 父关节
-parent_map:
-  left_elbow: left_shoulder
-  right_elbow: right_shoulder
-  left_knee: left_hip
-  right_knee: right_hip
-  left_ankle: left_knee
-  right_ankle: right_knee
-  left_shoulder: chest
-  right_shoulder: chest
-  left_hip: root
-  right_hip: root
-
-# 角度缩放因子（限制动作幅度）
+# 角度缩放因子
 scale_factors:
   default: 0.8
   arm: 0.7
   leg: 0.8
   spine: 0.5
+  head: 0.5
 
-# 关节角度限位（弧度）
+# 关节角度限位（弧度）—— 直接从 t1.xml 提取
 joint_limits:
-  root: [-0.3, 0.3]
-  waist: [-0.3, 0.3]
-  chest: [-0.3, 0.3]
-  neck: [-0.5, 0.5]
-  head: [-0.5, 0.5]
-  left_shoulder: [-2.5, 2.5]
-  left_elbow: [0.0, 2.5]
-  left_wrist: [-1.0, 1.0]
-  right_shoulder: [-2.5, 2.5]
-  right_elbow: [0.0, 2.5]
-  right_wrist: [-1.0, 1.0]
-  left_hip: [-1.5, 1.5]
-  left_knee: [0.0, 2.5]
-  left_ankle: [-1.0, 1.0]
-  right_hip: [-1.5, 1.5]
-  right_knee: [0.0, 2.5]
-  right_ankle: [-1.0, 1.0]
-  left_toe: [-0.5, 0.5]
-  right_toe: [-0.5, 0.5]
-  left_upper_arm: [-2.0, 2.0]
-  right_upper_arm: [-2.0, 2.0]
-  left_thigh: [-2.0, 2.0]
-  right_thigh: [-2.0, 2.0]
+  AAHead_yaw: [-1.57, 1.57]
+  Head_pitch: [-0.35, 1.22]
+  Left_Shoulder_Pitch: [-3.31, 1.22]
+  Left_Shoulder_Roll: [-1.74, 1.57]
+  Left_Elbow_Pitch: [-2.27, 2.27]
+  Left_Elbow_Yaw: [-2.44, 0.0]
+  Right_Shoulder_Pitch: [-3.31, 1.22]
+  Right_Shoulder_Roll: [-1.57, 1.74]
+  Right_Elbow_Pitch: [-2.27, 2.27]
+  Right_Elbow_Yaw: [0.0, 2.44]
+  Waist: [-1.57, 1.57]
+  Left_Hip_Pitch: [-1.8, 1.57]
+  Left_Hip_Roll: [-0.2, 1.57]
+  Left_Hip_Yaw: [-1.0, 1.0]
+  Left_Knee_Pitch: [0.0, 2.34]
+  Left_Ankle_Pitch: [-0.87, 0.35]
+  Left_Ankle_Roll: [-0.44, 0.44]
+  Right_Hip_Pitch: [-1.8, 1.57]
+  Right_Hip_Roll: [-1.57, 0.2]
+  Right_Hip_Yaw: [-1.0, 1.0]
+  Right_Knee_Pitch: [0.0, 2.34]
+  Right_Ankle_Pitch: [-0.87, 0.35]
+  Right_Ankle_Roll: [-0.44, 0.44]
+
+# ============================================================
+# MuJoCo actuator 顺序（与 t1.xml 完全一致，共 23 个）
+# ============================================================
+mujoco_actuator_order:
+  - "AAHead_yaw"
+  - "Head_pitch"
+  - "Left_Shoulder_Pitch"
+  - "Left_Shoulder_Roll"
+  - "Left_Elbow_Pitch"
+  - "Left_Elbow_Yaw"
+  - "Right_Shoulder_Pitch"
+  - "Right_Shoulder_Roll"
+  - "Right_Elbow_Pitch"
+  - "Right_Elbow_Yaw"
+  - "Waist"
+  - "Left_Hip_Pitch"
+  - "Left_Hip_Roll"
+  - "Left_Hip_Yaw"
+  - "Left_Knee_Pitch"
+  - "Left_Ankle_Pitch"
+  - "Left_Ankle_Roll"
+  - "Right_Hip_Pitch"
+  - "Right_Hip_Roll"
+  - "Right_Hip_Yaw"
+  - "Right_Knee_Pitch"
+  - "Right_Ankle_Pitch"
+  - "Right_Ankle_Roll"
+
+# ============================================================
+# 关节映射表（MediaPipe 关键点 → T1 actuator）
+# ============================================================
+# 每个 actuator 定义依赖的 MediaPipe 关键点列表和角度类型
+# source: 关键点名称列表，按顺序用于计算
+# type: pitch / roll / yaw
+joint_mapping:
+  AAHead_yaw:
+    source: ["left_shoulder", "right_shoulder", "nose"]
+    type: "yaw"
+  Head_pitch:
+    source: ["left_shoulder", "right_shoulder", "nose"]
+    type: "pitch"
+
+  Left_Shoulder_Pitch:
+    source: ["left_shoulder", "left_elbow"]
+    type: "pitch"
+  Left_Shoulder_Roll:
+    source: ["left_shoulder", "left_elbow"]
+    type: "roll"
+  Left_Elbow_Pitch:
+    source: ["left_elbow", "left_wrist"]
+    type: "pitch"
+  Left_Elbow_Yaw:
+    source: ["left_elbow", "left_wrist"]
+    type: "yaw"
+
+  Right_Shoulder_Pitch:
+    source: ["right_shoulder", "right_elbow"]
+    type: "pitch"
+  Right_Shoulder_Roll:
+    source: ["right_shoulder", "right_elbow"]
+    type: "roll"
+  Right_Elbow_Pitch:
+    source: ["right_elbow", "right_wrist"]
+    type: "pitch"
+  Right_Elbow_Yaw:
+    source: ["right_elbow", "right_wrist"]
+    type: "yaw"
+
+  Waist:
+    source: ["left_hip", "right_hip", "left_shoulder", "right_shoulder"]
+    type: "yaw"
+
+  Left_Hip_Pitch:
+    source: ["left_hip", "left_knee"]
+    type: "pitch"
+  Left_Hip_Roll:
+    source: ["left_hip", "left_knee"]
+    type: "roll"
+  Left_Hip_Yaw:
+    source: ["left_hip", "left_knee"]
+    type: "yaw"
+  Left_Knee_Pitch:
+    source: ["left_knee", "left_ankle"]
+    type: "pitch"
+  Left_Ankle_Pitch:
+    source: ["left_ankle"]
+    type: "pitch"
+  Left_Ankle_Roll:
+    source: ["left_ankle"]
+    type: "roll"
+
+  Right_Hip_Pitch:
+    source: ["right_hip", "right_knee"]
+    type: "pitch"
+  Right_Hip_Roll:
+    source: ["right_hip", "right_knee"]
+    type: "roll"
+  Right_Hip_Yaw:
+    source: ["right_hip", "right_knee"]
+    type: "yaw"
+  Right_Knee_Pitch:
+    source: ["right_knee", "right_ankle"]
+    type: "pitch"
+  Right_Ankle_Pitch:
+    source: ["right_ankle"]
+    type: "pitch"
+  Right_Ankle_Roll:
+    source: ["right_ankle"]
+    type: "roll"
+
+# ============================================================
+# 帧间约束参数
+# ============================================================
+max_frame_change: 0.3          # 每帧最大角度变化（弧度）
+smooth_window: 11              # Savitzky-Golay 平滑窗口（奇数）
+smooth_polyorder: 3            # 平滑多项式阶数
+enable_keyframe_calibration: true
