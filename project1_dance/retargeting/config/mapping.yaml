@@ -65,3 +65,88 @@ mujoco_actuator_order:
   - "Right_Knee_Pitch"
   - "Right_Ankle_Pitch"
   - "Right_Ankle_Roll"
+
+# ============================================================
+# 关节映射表（MediaPipe → T1）
+# ============================================================
+joint_mapping:
+  # 头部
+  AAHead_yaw:
+    source: ["left_shoulder", "right_shoulder", "nose"]
+    type: "yaw"
+  Head_pitch:
+    source: ["left_shoulder", "right_shoulder", "nose"]
+    type: "pitch"
+
+  # 左臂
+  Left_Shoulder_Pitch:
+    source: ["left_shoulder", "left_elbow", "left_wrist"]
+    type: "pitch"
+  Left_Shoulder_Roll:
+    source: ["left_shoulder", "left_elbow", "left_wrist"]
+    type: "roll"
+  Left_Elbow_Pitch:
+    source: ["left_elbow", "left_wrist"]
+    type: "pitch"
+  Left_Elbow_Yaw:
+    source: ["left_elbow", "left_wrist"]
+    type: "yaw"
+
+  # 右臂
+  Right_Shoulder_Pitch:
+    source: ["right_shoulder", "right_elbow", "right_wrist"]
+    type: "pitch"
+  Right_Shoulder_Roll:
+    source: ["right_shoulder", "right_elbow", "right_wrist"]
+    type: "roll"
+  Right_Elbow_Pitch:
+    source: ["right_elbow", "right_wrist"]
+    type: "pitch"
+  Right_Elbow_Yaw:
+    source: ["right_elbow", "right_wrist"]
+    type: "yaw"
+
+  # 躯干
+  Waist:
+    source: ["left_hip", "right_hip", "left_shoulder", "right_shoulder"]
+    type: "yaw"
+
+  # 左腿
+  Left_Hip_Pitch:
+    source: ["left_hip", "left_knee"]
+    type: "pitch"
+  Left_Hip_Roll:
+    source: ["left_hip", "left_knee"]
+    type: "roll"
+  Left_Hip_Yaw:
+    source: ["left_hip", "left_knee"]
+    type: "yaw"
+  Left_Knee_Pitch:
+    source: ["left_knee", "left_ankle"]
+    type: "pitch"
+  Left_Ankle_Pitch:
+    source: ["left_ankle"]
+    type: "pitch"
+  Left_Ankle_Roll:
+    source: ["left_ankle"]
+    type: "roll"
+
+  # 右腿
+  Right_Hip_Pitch:
+    source: ["right_hip", "right_knee"]
+    type: "pitch"
+  Right_Hip_Roll:
+    source: ["right_hip", "right_knee"]
+    type: "roll"
+  Right_Hip_Yaw:
+    source: ["right_hip", "right_knee"]
+    type: "yaw"
+  Right_Knee_Pitch:
+    source: ["right_knee", "right_ankle"]
+    type: "pitch"
+  Right_Ankle_Pitch:
+    source: ["right_ankle"]
+    type: "pitch"
+  Right_Ankle_Roll:
+    source: ["right_ankle"]
+    type: "roll"
