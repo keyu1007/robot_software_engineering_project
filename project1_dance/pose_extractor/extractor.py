@@ -1,3 +1,4 @@
+
 """
 姿态提取模块 - Mock 实现
 严格遵循 Booster T1 项目统一 PoseExtractor 接口规范，
@@ -20,7 +21,7 @@ from common import setup_logger
 logger = setup_logger("pose_extractor")
 
 
-class PromptHMRExtractor(PoseExtractor):
+class PoseExtractorImpl(PoseExtractor):
     """
     姿态提取器 Mock 实现
     完全对齐项目标准 PoseExtractor 接口，输出合规 MotionData，支持上下游模块联调

@@ -11,7 +11,7 @@ from pathlib import Path
 from common.interfaces import VideoProcessor
 
 
-class VideoProcessor(VideoProcessor):
+class VideoProcessorImpl(VideoProcessor):
     """
     视频处理类，继承自 common.interfaces.VideoProcessor
     实现 extract_frames() 和 get_video_metadata() 方法
@@ -40,12 +40,10 @@ class VideoProcessor(VideoProcessor):
             FileNotFoundError: 视频文件不存在
             ValueError: 视频无法打开或解码
         """
-        video_path = Path(video_path)
-
-        # 1. 检查文件是否存在
+        # 1. 确认视频存在
+        video_path = Path(video_path).resolve()
         if not video_path.exists():
             raise FileNotFoundError(f"视频文件不存在: {video_path}")
-
         # 2. 打开视频
         cap = cv2.VideoCapture(str(video_path))
         if not cap.isOpened():
