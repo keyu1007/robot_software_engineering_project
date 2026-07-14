@@ -18,6 +18,7 @@ build/
 venv/
 env/
 .venv/
+booster_dance/
 .env
 env.bak/
 venv.bak/
@@ -81,12 +82,8 @@ models/
 *.key
 *.pem
 secrets/
-# 输入视频文件，不提交到远程仓库
-inputs/*.mp4
-inputs/*.mov
-inputs/*.avi
 
-# 输出结果文件，不提交到远程仓库
-outputs/*
-pose_extractor_module.tar.gz
-video2robot/
+# 模型文件（太大，不入库）
+*.onnx
+*.task
+models/
