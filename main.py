@@ -102,13 +102,13 @@ def main():
 
     logger.info(f"  ✓ MotionData: {motion.num_joints} 关节, {motion.num_frames} 帧, {motion.duration:.1f} 秒")
 
-    # ===================== 4. Step3:数据清洗 =====================
+    # ===================== 4. Step3:数据清洗（人体关节空间） =====================
     logger.info("── Step 3/5: 数据清洗 ──")
     cleaner = MotionCleanerImpl()
-    outlier_mask = cleaner.detect_outliers(motion, threshold=3.0)
+    outlier_mask = cleaner.detect_outliers(motion, threshold=2.5)
     outlier_count = int(outlier_mask.sum())
     logger.info(f"  检测到 {outlier_count} 个异常值")
-    cleaned_motion = cleaner.clean(motion, smooth_window=5, filter_type="savgol")
+    cleaned_motion = cleaner.clean(motion, smooth_window=21, filter_type="savgol")
     logger.info(f"  ✓ 清洗完成: {cleaned_motion.num_joints} 关节, {cleaned_motion.num_frames} 帧")
 
     # ===================== 5. Step4:动作重定向 =====================
@@ -121,7 +121,13 @@ def main():
         retarget = RetargetingImpl()
         robot_motion = retarget.retarget(cleaned_motion)
 
-    logger.info(f"  ✓ Robot MotionData: {robot_motion.num_joints} 关节, {robot_motion.num_frames} 帧")
+    logger.info(f"  ✓ 重定向完成: {robot_motion.num_joints} 关节, {robot_motion.num_frames} 帧")
+
+    # ===== 新增：机器人关节空间二次平滑（压制抽搐核心操作）=====
+    logger.info("  正在对机器人关节角度做二次平滑...")
+    robot_cleaner = MotionCleanerImpl()
+    robot_motion = robot_cleaner.clean(robot_motion, smooth_window=15, filter_type="savgol")
+    logger.info(f"  ✓ 机器人关节二次平滑完成")
 
     # ===================== 6. Step5:MuJoCo仿真播放 =====================
     logger.info("── Step 5/5: MuJoCo 仿真播放 ──")
