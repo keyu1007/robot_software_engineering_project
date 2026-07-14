@@ -16,6 +16,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from common import setup_logger
+# 修正拼写错误：CfonfigLoader → ConfigLoader
 from common.config_loader import ConfigLoader
 from common.mock_factory import (
     create_mock_video_processor,
@@ -57,11 +58,14 @@ def main():
 
     args = parser.parse_args()
 
-    # ============================================================
-    # 1. 加载配置
-    # ============================================================
+    # ===================== 1. 加载配置 =====================
     config = ConfigLoader(args.config)
     mode = "mock" if args.mock else "real"
+
+    # 增加逻辑：真实模式下必须提供视频文件
+    if mode == "real" and args.video is None:
+        logger.error("真实模式(real)运行时必须指定 --video 视频路径！")
+        sys.exit(1)
 
     logger.info("=" * 60)
     logger.info("Booster T1 流水线启动")
@@ -71,77 +75,58 @@ def main():
     logger.info(f"  配置文件:  {args.config}")
     logger.info("=" * 60)
 
-    # ============================================================
-    # 2. Step 1: 视频处理 → 帧图像
-    # ============================================================
+    # ===================== 2. Step 1:视频处理 =====================
     logger.info("── Step 1/5: 视频处理 ──")
     if mode == "mock":
         video_proc = create_mock_video_processor()
         if args.video:
             frames = video_proc.extract_frames(args.video)
         else:
-            # 无视频时生成模拟帧
             frames = video_proc.extract_frames("mock.mp4")
     else:
-        # TODO: 成员 E 实现真实 VideoProcessor 后替换
         from project1_dance.video_processor.extractor import VideoProcessorImpl
         video_proc = VideoProcessorImpl()
         frames = video_proc.extract_frames(args.video)
 
     logger.info(f"  ✓ 已抽取 {len(frames)} 帧，shape={frames[0].shape if frames else 'N/A'}")
 
-    # ============================================================
-    # 3. Step 2: 姿态提取 → 人体 MotionData
-    # ============================================================
+    # ===================== 3. Step 2:姿态提取 =====================
     logger.info("── Step 2/5: 姿态提取 ──")
     if mode == "mock":
         pose_ext = create_mock_pose_extractor()
         motion = pose_ext.extract(frames, fps=30)
     else:
-        # TODO: 成员 B 实现真实 PoseExtractor 后替换
         from project1_dance.pose_extractor.extractor import PoseExtractorImpl
         pose_ext = PoseExtractorImpl()
         motion = pose_ext.extract(frames, fps=30)
 
     logger.info(f"  ✓ MotionData: {motion.num_joints} 关节, {motion.num_frames} 帧, {motion.duration:.1f} 秒")
 
-    # ============================================================
-    # 4. Step 3: 数据清洗 → 干净 MotionData
-    # ============================================================
+    # ===================== 4. Step3:数据清洗 =====================
     logger.info("── Step 3/5: 数据清洗 ──")
     cleaner = MotionCleanerImpl()
-
-    # 检测异常值
     outlier_mask = cleaner.detect_outliers(motion, threshold=3.0)
     outlier_count = int(outlier_mask.sum())
-    logger.info(f"  [Mock] 检测到 {outlier_count} 个异常值")
-
-    # 清洗
+    logger.info(f"  检测到 {outlier_count} 个异常值")
     cleaned_motion = cleaner.clean(motion, smooth_window=5, filter_type="savgol")
     logger.info(f"  ✓ 清洗完成: {cleaned_motion.num_joints} 关节, {cleaned_motion.num_frames} 帧")
 
-    # ============================================================
-    # 5. Step 4: 动作重定向 → 机器人 MotionData
-    # ============================================================
+    # ===================== 5. Step4:动作重定向 =====================
     logger.info("── Step 4/5: 动作重定向 ──")
     if mode == "mock":
         retarget = create_mock_retargeting()
         robot_motion = retarget.retarget(cleaned_motion)
     else:
-        # TODO: 成员 D 实现真实 Retargeting 后替换
         from project1_dance.retargeting.mapper import RetargetingImpl
         retarget = RetargetingImpl()
         robot_motion = retarget.retarget(cleaned_motion)
 
     logger.info(f"  ✓ Robot MotionData: {robot_motion.num_joints} 关节, {robot_motion.num_frames} 帧")
 
-    # ============================================================
-    # 6. Step 5: MuJoCo 仿真播放
-    # ============================================================
+    # ===================== 6. Step5:MuJoCo仿真播放 =====================
     logger.info("── Step 5/5: MuJoCo 仿真播放 ──")
     if mode == "mock":
         player = create_mock_mujoco_player()
-        # Mock 模式：加载模型后播放
         player.load_model("scene.xml")
         rendered_frames = player.play(
             robot_motion,
@@ -149,7 +134,6 @@ def main():
             render=True
         )
     else:
-        # TODO: 成员 F 实现真实 MuJoCoPlayer 后替换
         from project1_dance.mujoco_player.player import MuJoCoPlayerImpl
         player = MuJoCoPlayerImpl()
         player.load_model("scene.xml")
@@ -161,9 +145,7 @@ def main():
 
     logger.info(f"  ✓ 仿真完成: {len(rendered_frames)} 帧已渲染")
 
-    # ============================================================
-    # 7. 汇总
-    # ============================================================
+    # ===================== 7.汇总 =====================
     logger.info("=" * 60)
     logger.info("流水线执行成功")
     logger.info(
