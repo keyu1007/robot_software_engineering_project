@@ -213,6 +213,43 @@ class RetargetingImpl(Retargeting):
 
         idx_map = {name: i for i, name in enumerate(human_motion.joint_names)}
 
+        # ---- 腿长尺度校准 + 足部接地高度计算 ----
+        # 机器人真实腿长（大腿+小腿）
+        robot_leg_length = self.thigh_length + self.shin_length
+        
+        human_leg_lengths = []
+        ankle_heights = []  # 记录所有帧脚踝的垂直高度（T1坐标系z轴为向上方向）
+        
+        for t in range(T):
+            pos = positions[t]
+            kps = self._get_keypoints(pos, idx_map)
+            
+            left_hip = kps['left_hip']
+            left_ankle = kps['left_ankle']
+            right_hip = kps['right_hip']
+            right_ankle = kps['right_ankle']
+            
+            # 统计人体腿长
+            left_len = np.linalg.norm(left_ankle - left_hip)
+            right_len = np.linalg.norm(right_ankle - right_hip)
+            human_leg_lengths.append(left_len)
+            human_leg_lengths.append(right_len)
+            
+            # 记录脚踝高度（z轴为垂直向上方向）
+            ankle_heights.append(left_ankle[2])
+            ankle_heights.append(right_ankle[2])
+        
+        # 计算尺度修正系数：让人体腿长匹配机器人真实腿长
+        avg_human_leg = np.mean(human_leg_lengths)
+        # 2D恢复的关键点无真实米单位，禁用自动腿长缩放，保留手动经验比例
+        leg_scale = 1.0
+        # scale 保持原配置值不变
+        # 计算全局最低脚踝高度，用于地面对齐
+        min_ankle_z = np.min(ankle_heights)
+        # 根节点垂直偏移量：让最低的脚踝刚好落在地面 z=0 处
+        root_z_offset = -min_ankle_z
+        print(f"[Retargeting] 腿长校准系数: {leg_scale:.3f}, 根节点接地偏移: {root_z_offset:.3f}m")
+
         # ---- 逐帧计算原始角度 ----
         raw_angles = np.zeros((T, self.num_actuators), dtype=np.float32)
         for t in range(T):

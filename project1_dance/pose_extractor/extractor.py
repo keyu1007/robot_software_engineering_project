@@ -138,7 +138,7 @@ class PoseExtractorImpl(PoseExtractor):
                 or len(results.keypoints) == 0
             ):
                 if self.enable_smooth and self._last_smooth_joints is not None:
-                    all_joint_positions.append(self._last_smooth_keypoints.copy())
+                    all_joint_positions.append(self._last_smooth_joints.copy())
                 else:
                     all_joint_positions.append(
                         np.zeros((len(BOOSTER_T1_JOINT_NAMES), 3), dtype=np.float32)
