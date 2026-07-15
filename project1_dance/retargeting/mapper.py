@@ -1,8 +1,11 @@
 """
-动作重定向模块 — 成员D（含解析IK + 时序平滑 + 关键帧校准）
+动作重定向模块 — 成员D（优化版）
 
-解析IK：用余弦定理精确计算肘关节和膝关节的弯曲角度，
-替代原来的 arctan2 向量夹角估算，精度更高。
+新增优化：
+1. 相位展开（np.unwrap）：消除 -π/π 边界跳变
+2. 帧间约束：限制每帧角度变化率，防止突变
+3. 降低腿部缩放因子：让机器人更稳定
+4. 增大平滑窗口：减少抖动
 """
 
 from __future__ import annotations
@@ -19,7 +22,7 @@ from common.motion_data import MotionData
 
 
 class RetargetingImpl(Retargeting):
-    """动作重定向实现类（含解析IK）"""
+    """动作重定向实现类（优化版）"""
 
     def __init__(self, config_path: Optional[Union[str, Path]] = None):
         if config_path is None:
@@ -31,7 +34,6 @@ class RetargetingImpl(Retargeting):
         self.scale_factors: Dict[str, float] = config.get("scale_factors", {"default": 0.8})
         self.joint_limits: Dict[str, Tuple[float, float]] = config.get("joint_limits", {})
 
-        # 加载 actuator 名称（与 t1.xml 顺序一致）
         self.actuator_names = config.get("actuator_names", config.get("mujoco_actuator_order", [
             "AAHead_yaw", "Head_pitch",
             "Left_Shoulder_Pitch", "Left_Shoulder_Roll",
@@ -49,20 +51,19 @@ class RetargetingImpl(Retargeting):
         self.joint_mapping: Dict[str, Dict] = config.get("joint_mapping", {})
         self.num_actuators = len(self.actuator_names)
 
-        # 平滑参数
-        self.smooth_window = config.get("smooth_window", 11)
+        # ---- 优化参数 ----
+        self.smooth_window = config.get("smooth_window", 15)
         self.smooth_polyorder = config.get("smooth_polyorder", 3)
-        self.enable_keyframe_calibration = config.get("enable_keyframe_calibration", True)
+        self.enable_keyframe_calibration = config.get("enable_keyframe_calibration", False)
+        self.max_frame_change = config.get("max_frame_change", 0.15)
 
-        # ---- 解析IK所需的肢体长度（单位：米，MediaPipe坐标） ----
-        # 这些值可以根据实际人体比例调整
-        self.upper_arm_length = 0.28   # 上臂长度
-        self.forearm_length = 0.26     # 前臂长度
-        self.thigh_length = 0.42       # 大腿长度
-        self.shin_length = 0.40        # 小腿长度
+        # 解析IK肢体长度
+        self.upper_arm_length = 0.28
+        self.forearm_length = 0.26
+        self.thigh_length = 0.42
+        self.shin_length = 0.40
 
     def _rotate_to_t1(self, pos: np.ndarray) -> np.ndarray:
-        """MediaPipe (Y-up) → T1 (Z-up)"""
         R = np.array([
             [1, 0, 0],
             [0, 0, -1],
@@ -71,7 +72,6 @@ class RetargetingImpl(Retargeting):
         return R @ pos
 
     def _get_keypoints(self, pos: np.ndarray, idx_map: Dict[str, int]) -> Dict[str, np.ndarray]:
-        """获取所有关键点（自动坐标系转换）"""
         keypoints = {}
         for name, idx in idx_map.items():
             if idx < len(pos):
@@ -80,83 +80,35 @@ class RetargetingImpl(Retargeting):
                 keypoints[name] = np.zeros(3)
         return keypoints
 
-    # ============================================================
-    # 解析IK：余弦定理求肘关节角度
-    # ============================================================
     def _solve_elbow_angle(self, shoulder: np.ndarray, elbow: np.ndarray, wrist: np.ndarray) -> float:
-        """
-        用余弦定理计算肘关节弯曲角度（0~π）
-        输入：肩、肘、腕的三维坐标（已转换到T1坐标系）
-        返回：肘关节弯曲角（弧度）
-        """
-        # 上臂向量：肩→肘
         upper = elbow - shoulder
-        # 前臂向量：肘→腕
         forearm = wrist - elbow
-
-        # 实际测量的上臂和前臂长度
         len_upper = np.linalg.norm(upper)
         len_forearm = np.linalg.norm(forearm)
-
-        # 肩到腕的距离
         shoulder_to_wrist = np.linalg.norm(wrist - shoulder)
-
-        # 余弦定理：cos(肘角) = (a² + b² - c²) / (2ab)
-        # 其中 a = 上臂长度, b = 前臂长度, c = 肩到腕距离
-        a = len_upper
-        b = len_forearm
-        c = shoulder_to_wrist
-
-        if a < 1e-8 or b < 1e-8:
+        if len_upper < 1e-8 or len_forearm < 1e-8:
             return 0.0
-
-        # 限制 c 在有效范围内
-        c = np.clip(c, abs(a - b) + 0.001, a + b - 0.001)
-
-        cos_angle = (a*a + b*b - c*c) / (2 * a * b)
+        c = np.clip(shoulder_to_wrist, abs(len_upper - len_forearm) + 0.001, len_upper + len_forearm - 0.001)
+        cos_angle = (len_upper*len_upper + len_forearm*len_forearm - c*c) / (2 * len_upper * len_forearm)
         cos_angle = np.clip(cos_angle, -1.0, 1.0)
-
         return np.arccos(cos_angle)
 
-    # ============================================================
-    # 解析IK：余弦定理求膝关节角度
-    # ============================================================
     def _solve_knee_angle(self, hip: np.ndarray, knee: np.ndarray, ankle: np.ndarray) -> float:
-        """
-        用余弦定理计算膝关节弯曲角度（0~π）
-        输入：髋、膝、踝的三维坐标（已转换到T1坐标系）
-        返回：膝关节弯曲角（弧度）
-        """
         thigh = knee - hip
         shin = ankle - knee
-
         len_thigh = np.linalg.norm(thigh)
         len_shin = np.linalg.norm(shin)
-
         hip_to_ankle = np.linalg.norm(ankle - hip)
-
-        a = len_thigh
-        b = len_shin
-        c = hip_to_ankle
-
-        if a < 1e-8 or b < 1e-8:
+        if len_thigh < 1e-8 or len_shin < 1e-8:
             return 0.0
-
-        c = np.clip(c, abs(a - b) + 0.001, a + b - 0.001)
-
-        cos_angle = (a*a + b*b - c*c) / (2 * a * b)
+        c = np.clip(hip_to_ankle, abs(len_thigh - len_shin) + 0.001, len_thigh + len_shin - 0.001)
+        cos_angle = (len_thigh*len_thigh + len_shin*len_shin - c*c) / (2 * len_thigh * len_shin)
         cos_angle = np.clip(cos_angle, -1.0, 1.0)
-
         return np.arccos(cos_angle)
 
-    # ============================================================
-    # 方向角计算（用于肩、髋的朝向）
-    # ============================================================
     def _compute_direction_angle(self, vec: np.ndarray, axis: str) -> float:
-        """计算向量在指定平面与垂直方向的夹角（有符号）"""
         if np.linalg.norm(vec) < 1e-8:
             return 0.0
-
         if axis == 'xz':
             v = np.array([vec[0], vec[2]])
         elif axis == 'yz':
@@ -165,25 +117,16 @@ class RetargetingImpl(Retargeting):
             v = np.array([vec[0], vec[1]])
         else:
             return 0.0
-
         vert = np.array([0, 1])
         norm_v = np.linalg.norm(v)
         if norm_v < 1e-8:
             return 0.0
-
         return np.arctan2(v[0]*vert[1] - v[1]*vert[0], v[0]*vert[0] + v[1]*vert[1])
 
-    # ============================================================
-    # 核心：单帧角度计算
-    # ============================================================
     def _compute_frame_angles(self, pos: np.ndarray, idx_map: Dict[str, int], scale: float) -> np.ndarray:
-        """计算单帧的23个actuator角度（含解析IK）"""
         angles = np.zeros(self.num_actuators, dtype=np.float32)
-
-        # 获取关键点（已转换到T1坐标系）
         kps = self._get_keypoints(pos, idx_map)
 
-        # ---- 提取关键点坐标 ----
         nose = kps.get('nose', np.zeros(3))
         left_shoulder = kps.get('left_shoulder', np.zeros(3))
         right_shoulder = kps.get('right_shoulder', np.zeros(3))
@@ -204,73 +147,62 @@ class RetargetingImpl(Retargeting):
 
         s = scale
         arm_s = s * self.scale_factors.get('arm', 0.7)
-        leg_s = s * self.scale_factors.get('leg', 0.8)
+        leg_s = s * self.scale_factors.get('leg', 0.5)   # 优化：降低腿部幅度
         head_s = s * self.scale_factors.get('head', 0.5)
         spine_s = s * self.scale_factors.get('spine', 0.5)
 
         # ---- 头部 ----
         head_vec = nose - shoulder_center
         if np.linalg.norm(head_vec) > 1e-6:
-            angles[0] = self._compute_direction_angle(head_vec, 'xz') * head_s   # AAHead_yaw
-            angles[1] = self._compute_direction_angle(head_vec, 'yz') * head_s   # Head_pitch
+            angles[0] = self._compute_direction_angle(head_vec, 'xz') * head_s
+            angles[1] = self._compute_direction_angle(head_vec, 'yz') * head_s
 
         # ---- 躯干 ----
         if np.linalg.norm(spine) > 1e-6:
-            angles[10] = self._compute_direction_angle(spine, 'xz') * spine_s    # Waist
+            angles[10] = self._compute_direction_angle(spine, 'xz') * spine_s
 
-        # ---- 左臂（解析IK计算肘关节） ----
+        # ---- 左臂 ----
         if np.linalg.norm(left_shoulder - left_elbow) > 1e-6:
             upper_arm = left_elbow - left_shoulder
-            # 肩关节方向
-            angles[2] = self._compute_direction_angle(upper_arm, 'yz') * arm_s   # Left_Shoulder_Pitch
-            angles[3] = self._compute_direction_angle(upper_arm, 'xz') * arm_s   # Left_Shoulder_Roll
-            # 肘关节（余弦定理）
-            elbow_angle = self._solve_elbow_angle(left_shoulder, left_elbow, left_wrist)
-            angles[4] = elbow_angle * arm_s                                       # Left_Elbow_Pitch
-            # 肘部扭角（简化：用前臂的水平投影）
+            angles[2] = self._compute_direction_angle(upper_arm, 'yz') * arm_s
+            angles[3] = self._compute_direction_angle(upper_arm, 'xz') * arm_s
+            angles[4] = self._solve_elbow_angle(left_shoulder, left_elbow, left_wrist) * arm_s
             forearm = left_wrist - left_elbow
-            angles[5] = self._compute_direction_angle(forearm, 'xz') * arm_s     # Left_Elbow_Yaw
+            angles[5] = self._compute_direction_angle(forearm, 'xz') * arm_s
 
         # ---- 右臂 ----
         if np.linalg.norm(right_shoulder - right_elbow) > 1e-6:
             upper_arm = right_elbow - right_shoulder
-            angles[6] = self._compute_direction_angle(upper_arm, 'yz') * arm_s   # Right_Shoulder_Pitch
-            angles[7] = self._compute_direction_angle(upper_arm, 'xz') * arm_s   # Right_Shoulder_Roll
-            elbow_angle = self._solve_elbow_angle(right_shoulder, right_elbow, right_wrist)
-            angles[8] = elbow_angle * arm_s                                      # Right_Elbow_Pitch
+            angles[6] = self._compute_direction_angle(upper_arm, 'yz') * arm_s
+            angles[7] = self._compute_direction_angle(upper_arm, 'xz') * arm_s
+            angles[8] = self._solve_elbow_angle(right_shoulder, right_elbow, right_wrist) * arm_s
             forearm = right_wrist - right_elbow
-            angles[9] = self._compute_direction_angle(forearm, 'xz') * arm_s     # Right_Elbow_Yaw
+            angles[9] = self._compute_direction_angle(forearm, 'xz') * arm_s
 
-        # ---- 左腿（解析IK计算膝关节） ----
+        # ---- 左腿 ----
         if np.linalg.norm(left_hip - left_knee) > 1e-6:
             thigh = left_knee - left_hip
-            angles[11] = self._compute_direction_angle(thigh, 'yz') * leg_s      # Left_Hip_Pitch
-            angles[12] = self._compute_direction_angle(thigh, 'xz') * leg_s      # Left_Hip_Roll
-            angles[13] = self._compute_direction_angle(thigh, 'xy') * leg_s      # Left_Hip_Yaw
-            knee_angle = self._solve_knee_angle(left_hip, left_knee, left_ankle)
-            angles[14] = knee_angle * leg_s                                      # Left_Knee_Pitch
-            # 踝关节
+            angles[11] = self._compute_direction_angle(thigh, 'yz') * leg_s
+            angles[12] = self._compute_direction_angle(thigh, 'xz') * leg_s
+            angles[13] = self._compute_direction_angle(thigh, 'xy') * leg_s
+            angles[14] = self._solve_knee_angle(left_hip, left_knee, left_ankle) * leg_s
             shin = left_ankle - left_knee
-            angles[15] = self._compute_direction_angle(shin, 'yz') * leg_s       # Left_Ankle_Pitch
-            angles[16] = self._compute_direction_angle(shin, 'xz') * leg_s       # Left_Ankle_Roll
+            angles[15] = self._compute_direction_angle(shin, 'yz') * leg_s
+            angles[16] = self._compute_direction_angle(shin, 'xz') * leg_s
 
         # ---- 右腿 ----
         if np.linalg.norm(right_hip - right_knee) > 1e-6:
             thigh = right_knee - right_hip
-            angles[17] = self._compute_direction_angle(thigh, 'yz') * leg_s      # Right_Hip_Pitch
-            angles[18] = self._compute_direction_angle(thigh, 'xz') * leg_s      # Right_Hip_Roll
-            angles[19] = self._compute_direction_angle(thigh, 'xy') * leg_s      # Right_Hip_Yaw
-            knee_angle = self._solve_knee_angle(right_hip, right_knee, right_ankle)
-            angles[20] = knee_angle * leg_s                                      # Right_Knee_Pitch
+            angles[17] = self._compute_direction_angle(thigh, 'yz') * leg_s
+            angles[18] = self._compute_direction_angle(thigh, 'xz') * leg_s
+            angles[19] = self._compute_direction_angle(thigh, 'xy') * leg_s
+            angles[20] = self._solve_knee_angle(right_hip, right_knee, right_ankle) * leg_s
             shin = right_ankle - right_knee
-            angles[21] = self._compute_direction_angle(shin, 'yz') * leg_s       # Right_Ankle_Pitch
-            angles[22] = self._compute_direction_angle(shin, 'xz') * leg_s       # Right_Ankle_Roll
+            angles[21] = self._compute_direction_angle(shin, 'yz') * leg_s
+            angles[22] = self._compute_direction_angle(shin, 'xz') * leg_s
 
         return angles
 
-    # ============================================================
-    # retarget：主入口
-    # ============================================================
     def retarget(self, human_motion: MotionData, **kwargs) -> MotionData:
         if human_motion.positions is None:
             raise ValueError("human_motion.positions 不能为 None")
@@ -279,31 +211,39 @@ class RetargetingImpl(Retargeting):
         T = positions.shape[0]
         scale = kwargs.get("scale", self.scale_factors.get("default", 0.8))
 
-        joint_name_to_idx = {
-            name: i for i, name in enumerate(human_motion.joint_names)
-        }
+        idx_map = {name: i for i, name in enumerate(human_motion.joint_names)}
 
+        # ---- 逐帧计算原始角度 ----
         raw_angles = np.zeros((T, self.num_actuators), dtype=np.float32)
-
         for t in range(T):
-            frame_pos = positions[t]
-            angles = self._compute_frame_angles(frame_pos, joint_name_to_idx, scale)
-            raw_angles[t] = angles
+            raw_angles[t] = self._compute_frame_angles(positions[t], idx_map, scale)
 
-        # ---- 关键帧校准 ----
+        # ---- 1. 相位展开（消除 -π/π 边界跳变） ----
+        unwrapped_angles = np.unwrap(raw_angles, axis=0)
+
+        # ---- 2. 帧间约束（限制每帧变化率） ----
+        constrained_angles = unwrapped_angles.copy()
+        if T > 1:
+            max_change = self.max_frame_change
+            for t in range(1, T):
+                diff = constrained_angles[t] - constrained_angles[t-1]
+                clipped_diff = np.clip(diff, -max_change, max_change)
+                constrained_angles[t] = constrained_angles[t-1] + clipped_diff
+
+        # ---- 3. 关键帧校准（可选，默认关闭） ----
         if self.enable_keyframe_calibration and T > 0:
-            offset = raw_angles[0].copy()
-            calibrated_angles = raw_angles - offset
+            offset = constrained_angles[0].copy()
+            calibrated_angles = constrained_angles - offset
         else:
-            calibrated_angles = raw_angles
+            calibrated_angles = constrained_angles
 
-        # ---- 关节限位 ----
+        # ---- 4. 关节限位 ----
         for i, name in enumerate(self.actuator_names):
             if name in self.joint_limits:
                 min_val, max_val = self.joint_limits[name]
                 calibrated_angles[:, i] = np.clip(calibrated_angles[:, i], min_val, max_val)
 
-        # ---- 时序平滑 ----
+        # ---- 5. 输出平滑（Savitzky-Golay） ----
         if T >= self.smooth_window:
             window = self.smooth_window
             if window % 2 == 0:
