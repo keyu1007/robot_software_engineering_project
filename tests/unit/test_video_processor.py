@@ -1,11 +1,16 @@
+"""
+视频处理模块单元测试
+测试目标：project1_dance/video_processor/extractor.py
+测试范围：视频抽帧、元数据读取、异常处理、边界条件
+"""
 import pytest
 import numpy as np
 import cv2
 import os
 import tempfile
 from pathlib import Path
-from common.interfaces import VideoProcessor
-from project1_dance.video_processor.extractor import VideoProcessor
+from common.interfaces import VideoProcessor as VideoProcessorInterface
+from project1_dance.video_processor.extractor import VideoProcessorImpl
 
 
 # ===================== Fixture =====================
@@ -13,7 +18,7 @@ from project1_dance.video_processor.extractor import VideoProcessor
 @pytest.fixture
 def video_processor():
     """实例化视频处理器"""
-    return VideoProcessor()
+    return VideoProcessorImpl()
 
 
 @pytest.fixture
@@ -240,10 +245,9 @@ def test_get_video_metadata_file_not_found(video_processor):
 def test_video_processor_implements_interface(video_processor):
     """
     ✅ 预期通过
-    场景：验证 VideoProcessor 类正确实现了接口
+    场景：验证 VideoProcessorImpl 正确实现了接口
     验证：所有抽象方法都已实现，且签名匹配
     """
-    from common.interfaces import VideoProcessor as VideoProcessorInterface
     assert isinstance(video_processor, VideoProcessorInterface), "未正确实现 VideoProcessor 接口"
     
     assert hasattr(video_processor, "extract_frames"), "缺少 extract_frames 方法"
