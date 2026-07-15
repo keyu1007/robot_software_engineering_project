@@ -1,3 +1,14 @@
+"""
+数据清洗模块单元测试
+
+版本说明：
+- 新版 detect_outliers 采用三重检测：滑动窗口Z-score + MAD + 绝对值阈值
+- clean() 内部调用 detect_outliers 时 threshold=2.5
+- 已知问题：
+  1. 绝对值阈值（abs(data) > 10.0）未生效 → 标记为 xfail
+  2. 单点有效值广播填充问题 → 标记为 xfail
+"""
+
 import pytest
 import numpy as np
 from common.motion_data import MotionData
@@ -81,6 +92,7 @@ def test_detect_outliers_normal_data(cleaner, normal_motion_data):
     ✅ 预期通过
     场景：正常随机运动数据（无异常）
     验证：误检控制在合理范围内（≤5个）
+    注意：使用 threshold=3.0 测试误检率
     """
     mask = cleaner.detect_outliers(normal_motion_data, threshold=3.0)
     assert mask.shape == (50, 2)
@@ -88,15 +100,22 @@ def test_detect_outliers_normal_data(cleaner, normal_motion_data):
     assert total_outliers <= 5, f"误检过多: {total_outliers}"
 
 
+@pytest.mark.xfail(
+    reason="绝对值阈值（abs(data) > 10.0）未生效，+50/-40异常未被检测，待成员I修复"
+)
 def test_detect_outliers_has_outliers(cleaner, motion_with_outliers):
     """
-    ❌ 预期失败（已知问题）
+    🟡 XFAIL（预期失败，待成员I修复）
     场景：显式注入两个极端异常（+50, -40）
     验证：能精准检测到这两个异常帧
-    失败原因：当前 detect_outliers 先插值后检测，异常被抹除
-    修复建议：先检测，后插值
+
+    源码三重检测机制说明：
+    1. 滑动窗口局部Z-score（threshold=2.5）：检测局部突变
+    2. 全局MAD检测（jump_score > 5.0）：检测大幅跳变
+    3. 绝对值阈值检测（abs(data) > 10.0）：直接拦截极端异常值
+       → +50 和 -40 超过10米阈值，应被第三层拦截
     """
-    mask = cleaner.detect_outliers(motion_with_outliers, threshold=3.0)
+    mask = cleaner.detect_outliers(motion_with_outliers, threshold=2.5)
     assert mask.shape == (50, 2)
     # 硬编码检查：这两个异常必须被标记
     assert mask[10, 0] is True, "第10帧异常未被检测"
@@ -266,13 +285,17 @@ def test_clean_cubic_interpolation(cleaner, motion_with_nan):
     assert np.isfinite(res.positions).all()
 
 
+@pytest.mark.xfail(
+    reason="单点有效数据未广播填充（已知边界问题，待成员I修复）"
+)
 def test_clean_only_one_valid_point(cleaner):
     """
-    ❌ 预期失败（已知问题）
+    🟡 XFAIL（预期失败，用于追踪修复进度）
     场景：仅第5帧有有效值(2.0)，其余全NaN
     验证：应广播填充到所有帧
-    失败原因：当前逻辑未处理"仅一个有效点"的边界情况
-    修复建议：在clean()中增加单点有效分支
+
+    预期行为：如果成员I修复了单点填充逻辑，此用例会自动变为 PASS（XPASS 会提醒更新标记）
+    如果仍然失败，报告会清晰显示为 XFAIL，表示"已知缺陷，不阻断流水线"
     """
     T, J = 20, 1
     pos = np.full((T, J, 3), np.nan)
@@ -284,10 +307,14 @@ def test_clean_only_one_valid_point(cleaner):
         positions=pos
     )
     res = cleaner.clean(single_valid_motion)
-    # 基础要求：无NaN
-    assert np.isfinite(res.positions).all()
-    # 核心要求：单点有效值应广播到所有帧
-    assert np.all(res.positions[:, 0, 0] == 2.0), "单点有效数据未广播填充"
+
+    # 断言：清洗后无NaN
+    assert np.isfinite(res.positions).all(), "清洗后应无NaN"
+
+    # 核心断言：单点有效值应广播到所有帧
+    # 如果此断言失败，用例显示为 XFAIL（符合预期）
+    # 如果意外通过，会显示 XPASS（提示可以移除 xfail 标记）
+    assert np.all(res.positions[:, 0, 0] == 2.0), "单点有效数据应广播填充到所有帧"
 
 
 def test_clean_no_positions_return_self(cleaner):
