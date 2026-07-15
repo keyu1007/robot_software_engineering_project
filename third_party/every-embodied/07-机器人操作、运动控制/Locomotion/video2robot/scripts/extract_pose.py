@@ -4,6 +4,44 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 
+def repair_keypoints_by_confidence(kpts_sequence, conf_threshold=0.5):
+    """
+    基于置信度逐关节修复关键点序列：低置信度关节用上一帧有效数据填充
+    """
+    num_frames, num_joints, _ = kpts_sequence.shape
+    repaired_xy = np.zeros((num_frames, num_joints, 2), dtype=np.float32)
+    
+    for joint_idx in range(num_joints):
+        if kpts_sequence[0, joint_idx, 2] >= conf_threshold:
+            repaired_xy[0, joint_idx] = kpts_sequence[0, joint_idx, :2]
+        else:
+            repaired_xy[0, joint_idx] = [0, 0]
+    
+    for frame_idx in range(1, num_frames):
+        for joint_idx in range(num_joints):
+            if kpts_sequence[frame_idx, joint_idx, 2] >= conf_threshold:
+                repaired_xy[frame_idx, joint_idx] = kpts_sequence[frame_idx, joint_idx, :2]
+            else:
+                repaired_xy[frame_idx, joint_idx] = repaired_xy[frame_idx - 1, joint_idx]
+    
+    return repaired_xy
+
+
+def temporal_lowpass_filter(kpts_sequence, window_size=5):
+    """
+    时序滑动平均低通滤波，削弱关键点帧间抖动
+    """
+    num_frames, num_joints, _ = kpts_sequence.shape
+    filtered = np.zeros_like(kpts_sequence)
+    
+    for joint_idx in range(num_joints):
+        for dim in range(2):
+            coords = kpts_sequence[:, joint_idx, dim]
+            kernel = np.ones(window_size) / window_size
+            filtered[:, joint_idx, dim] = np.convolve(coords, kernel, mode='same')
+    
+    return filtered
+
 
 def main():
     parser = argparse.ArgumentParser(description="Video2Robot 姿态提取模块（YOLO兼容版）")
@@ -24,7 +62,7 @@ def main():
     # 自动下载轻量版姿态模型，CPU可运行
     model = YOLO('yolov8n-pose.onnx')
 
-    # ========== 2. 读取视频逐帧提取 ==========
+# ========== 2. 读取视频逐帧提取 + 时序平滑处理 ==========
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise FileNotFoundError(f"无法打开视频文件: {video_path}")
@@ -33,9 +71,10 @@ def main():
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     print(f"[Info] 视频总帧数: {total_frames}, FPS: {fps:.2f}")
 
-    joints_3d_list = []
+    all_kpts_with_conf = []  # 收集所有帧的关键点+置信度，形状[帧数, 17, 3] (x, y, 置信度)
     frame_idx = 0
 
+    # 第一步：逐帧推理，收集全量关键点数据
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
@@ -46,24 +85,39 @@ def main():
 
         if results.keypoints.has_visible:
             # 提取17个关键点的2D坐标 + 置信度
-            kpts = results.keypoints.xy[0].cpu().numpy()  # (17, 2)
-            # 补充伪深度（归一化相对深度，保证3D维度）
-            conf = results.keypoints.conf[0].cpu().numpy()[:, None]
-            joint_3d = np.concatenate([kpts, conf], axis=1)
+            kpts_xy = results.keypoints.xy[0].cpu().numpy()  # (17, 2)
+            conf = results.keypoints.conf[0].cpu().numpy()[:, None]  # (17, 1)
+            # 拼接为 [x, y, 置信度] 格式
+            kpts_single = np.concatenate([kpts_xy, conf], axis=1)  # (17, 3)
         else:
-            # 检测失败用上一帧填充
-            if len(joints_3d_list) > 0:
-                joint_3d = joints_3d_list[-1]
-            else:
-                joint_3d = np.zeros((17, 3))
+            # 未检测到人体，生成全0低置信度占位
+            kpts_single = np.zeros((17, 3), dtype=np.float32)
 
-        joints_3d_list.append(joint_3d)
+        all_kpts_with_conf.append(kpts_single)
         frame_idx += 1
 
         if frame_idx % 30 == 0:
             print(f"[Progress] 处理进度: {frame_idx}/{total_frames} 帧")
 
     cap.release()
+
+    # 第二步：序列后处理（完全对应作业要求）
+    kpts_sequence = np.array(all_kpts_with_conf)  # 形状 [总帧数, 17, 3]
+
+    # 2.1 置信度过滤：低置信度关节用上一帧数据插值修复
+    repaired_xy = repair_keypoints_by_confidence(kpts_sequence, conf_threshold=0.5)
+    # 2.2 时序低通滤波：对坐标做时间维度平滑，从源头消除抖动抽搐
+    filtered_xy = temporal_lowpass_filter(repaired_xy, window_size=5)
+
+    # 第三步：组装回原格式，保证下游代码零修改对接
+    joints_3d_list = []
+    num_frames = filtered_xy.shape[0]
+    for i in range(num_frames):
+        # 平滑坐标 + 原置信度拼接，输出结构与原规范完全一致
+        conf_col = kpts_sequence[i, :, 2:3]
+        joint_3d = np.concatenate([filtered_xy[i], conf_col], axis=1)
+        joints_3d_list.append(joint_3d)
+
 
     # ========== 3. 封装为 SMPLX 兼容格式 ==========
     joints_3d = np.array(joints_3d_list)
